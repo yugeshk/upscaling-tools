@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Video upscaling using Real-ESRGAN
+Video upscaling using Real-ESRGAN (PyTorch backend)
 Usage: python upscale_video.py input.mp4 output.mp4 [--scale 2|4] [--model MODEL]
 """
 
@@ -9,7 +9,10 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
+
+import config
 
 def run_cmd(cmd, desc=None):
     """Run a shell command and print output"""
@@ -39,16 +42,22 @@ def get_video_info(input_path):
     return width, height, fps
 
 def main():
-    parser = argparse.ArgumentParser(description='Upscale video using Real-ESRGAN')
+    model_choices = list(config.PYTORCH_MODELS.keys())
+
+    parser = argparse.ArgumentParser(description='Upscale video using Real-ESRGAN (PyTorch)')
     parser.add_argument('input', help='Input video file')
     parser.add_argument('output', help='Output video file')
-    parser.add_argument('--scale', type=int, choices=[2, 4], default=4, help='Upscale factor (default: 4)')
-    parser.add_argument('--model', default='RealESRGAN_x4plus',
-                        choices=['RealESRGAN_x4plus', 'RealESRGAN_x4plus_anime', 'RealESRNet_x4plus', 'realesr-animevideov3'],
-                        help='Model to use (default: RealESRGAN_x4plus)')
+    parser.add_argument('--scale', type=int, choices=[2, 4], default=config.DEFAULT_SCALE,
+                        help=f'Upscale factor (default: {config.DEFAULT_SCALE})')
+    parser.add_argument('--model', default=config.DEFAULT_MODEL_PYTORCH, choices=model_choices,
+                        help=f'Model to use (default: {config.DEFAULT_MODEL_PYTORCH})')
     parser.add_argument('--fps', type=float, help='Output FPS (default: same as input)')
     parser.add_argument('--keep-frames', action='store_true', help='Keep extracted frames after processing')
-    parser.add_argument('--crf', type=int, default=18, help='Output video CRF quality (default: 18)')
+    parser.add_argument('--crf', type=int, default=config.DEFAULT_CRF,
+                        help=f'Output video CRF quality (default: {config.DEFAULT_CRF})')
+    parser.add_argument('--tile-size', type=int, default=config.TILE_SIZE,
+                        help=f'Tile size for processing — reduce if OOM (default: {config.TILE_SIZE})')
+    parser.add_argument('--duration', type=float, help='Only process first N seconds (for testing)')
     args = parser.parse_args()
 
     input_path = Path(args.input).resolve()
@@ -72,25 +81,24 @@ def main():
     print(f"Model: {args.model}")
 
     # Create temp directories
-    script_dir = Path(__file__).parent.resolve()
-    temp_dir = script_dir / 'temp_frames'
+    temp_dir = Path(tempfile.mkdtemp(prefix='upscale_'))
     input_frames_dir = temp_dir / 'input'
     output_frames_dir = temp_dir / 'output'
-
-    # Clean up any existing temp dirs
-    if temp_dir.exists():
-        shutil.rmtree(temp_dir)
 
     input_frames_dir.mkdir(parents=True)
     output_frames_dir.mkdir(parents=True)
 
     try:
         # Step 1: Extract frames
-        run_cmd([
+        extract_cmd = [
             'ffmpeg', '-y', '-i', str(input_path),
             '-qscale:v', '1', '-qmin', '1', '-qmax', '1',
-            str(input_frames_dir / 'frame_%08d.png')
-        ], "Extracting frames from video...")
+        ]
+        if args.duration:
+            extract_cmd.extend(['-t', str(args.duration)])
+        extract_cmd.append(str(input_frames_dir / 'frame_%08d.png'))
+
+        run_cmd(extract_cmd, "Extracting frames from video...")
 
         # Count frames
         frame_count = len(list(input_frames_dir.glob('*.png')))
@@ -100,69 +108,49 @@ def main():
         print(f"\n>>> Upscaling frames with Real-ESRGAN ({args.model})...")
         print(f"    This may take a while...")
 
-        # Use the inference_realesrgan.py script or the library directly
         from realesrgan import RealESRGANer
         from basicsr.archs.rrdbnet_arch import RRDBNet
         import cv2
         import torch
         from tqdm import tqdm
 
-        # Local weights directory
+        # Load model config
+        script_dir = Path(__file__).parent.resolve()
         weights_dir = script_dir / 'weights'
+        model_cfg = config.PYTORCH_MODELS[args.model]
 
-        # Model filenames and URLs
-        model_files = {
-            'RealESRGAN_x4plus': 'RealESRGAN_x4plus.pth',
-            'RealESRGAN_x4plus_anime': 'RealESRGAN_x4plus_anime_6B.pth',
-            'RealESRNet_x4plus': 'RealESRNet_x4plus.pth',
-            'realesr-animevideov3': 'realesr-animevideov3.pth'
-        }
-        model_urls = {
-            'RealESRGAN_x4plus': 'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth',
-            'RealESRGAN_x4plus_anime': 'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.2.4/RealESRGAN_x4plus_anime_6B.pth',
-            'RealESRNet_x4plus': 'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.1/RealESRNet_x4plus.pth',
-            'realesr-animevideov3': 'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-animevideov3.pth'
-        }
-
-        # Setup model
-        if args.model == 'RealESRGAN_x4plus':
-            model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=4)
-            netscale = 4
-        elif args.model == 'RealESRGAN_x4plus_anime':
-            model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=6, num_grow_ch=32, scale=4)
-            netscale = 4
-        elif args.model == 'RealESRNet_x4plus':
-            model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=4)
-            netscale = 4
-        else:
-            model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=6, num_grow_ch=32, scale=4)
-            netscale = 4
+        model = RRDBNet(
+            num_in_ch=3, num_out_ch=3, num_feat=64,
+            num_block=model_cfg["num_block"],
+            num_grow_ch=model_cfg["num_grow_ch"],
+            scale=model_cfg["netscale"],
+        )
+        netscale = model_cfg["netscale"]
 
         # Check for local model first, fall back to URL
-        model_filename = model_files.get(args.model, model_files['RealESRGAN_x4plus'])
-        local_model_path = weights_dir / model_filename
+        local_model_path = weights_dir / model_cfg["filename"]
         if local_model_path.exists():
             model_path = str(local_model_path)
             print(f"    Using local model: {model_path}")
         else:
-            model_path = model_urls.get(args.model, model_urls['RealESRGAN_x4plus'])
+            model_path = model_cfg["url"]
             print(f"    Model not found locally, will download from: {model_path}")
 
-        # Determine device - Note: MPS (Apple Silicon) has incomplete support for some ops, use CPU
+        # Determine device
         if torch.cuda.is_available():
             device = 'cuda'
         else:
-            device = 'cpu'  # MPS not fully supported for Real-ESRGAN convolutions
+            device = 'cpu'
         print(f"    Using device: {device}")
 
         upsampler = RealESRGANer(
             scale=netscale,
             model_path=model_path,
             model=model,
-            tile=512,  # Process in 512x512 tiles for large images
-            tile_pad=10,
+            tile=args.tile_size,
+            tile_pad=config.TILE_PAD,
             pre_pad=0,
-            half=False,  # Use FP32 for better compatibility
+            half=config.USE_HALF,
             device=device
         )
 
@@ -179,10 +167,10 @@ def main():
             'ffmpeg', '-y',
             '-framerate', str(output_fps),
             '-i', str(output_frames_dir / 'frame_%08d.png'),
-            '-c:v', 'libx264',
+            '-c:v', config.VIDEO_CODEC,
             '-crf', str(args.crf),
-            '-preset', 'slow',
-            '-pix_fmt', 'yuv420p',
+            '-preset', config.VIDEO_PRESET,
+            '-pix_fmt', config.PIX_FMT,
             '-movflags', '+faststart',
             str(output_path)
         ], "Reassembling video...")
@@ -202,7 +190,7 @@ def main():
                 '-i', str(temp_output),
                 '-i', str(input_path),
                 '-c:v', 'copy',
-                '-c:a', 'aac', '-b:a', '192k',
+                '-c:a', 'aac', '-b:a', config.AUDIO_BITRATE,
                 '-map', '0:v:0', '-map', '1:a:0?',
                 '-shortest',
                 str(output_path)

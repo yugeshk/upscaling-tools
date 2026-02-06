@@ -9,8 +9,11 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from tqdm import tqdm
+
+import config
 
 def run_cmd(cmd, desc=None, capture=True):
     """Run a shell command and print output"""
@@ -49,13 +52,14 @@ def main():
     parser = argparse.ArgumentParser(description='Upscale video using Real-ESRGAN ncnn-vulkan (GPU)')
     parser.add_argument('input', help='Input video file')
     parser.add_argument('output', help='Output video file')
-    parser.add_argument('--scale', type=int, choices=[2, 3, 4], default=2, help='Upscale factor (default: 2)')
-    parser.add_argument('--model', default='realesrgan-x4plus',
-                        choices=['realesrgan-x4plus', 'realesrgan-x4plus-anime', 'realesr-animevideov3'],
-                        help='Model to use (default: realesrgan-x4plus)')
+    parser.add_argument('--scale', type=int, choices=[2, 3, 4], default=config.DEFAULT_SCALE,
+                        help=f'Upscale factor (default: {config.DEFAULT_SCALE})')
+    parser.add_argument('--model', default=config.DEFAULT_MODEL_NCNN, choices=config.NCNN_MODELS,
+                        help=f'Model to use (default: {config.DEFAULT_MODEL_NCNN})')
     parser.add_argument('--fps', type=float, help='Output FPS (default: same as input)')
     parser.add_argument('--keep-frames', action='store_true', help='Keep extracted frames after processing')
-    parser.add_argument('--crf', type=int, default=18, help='Output video CRF quality (default: 18)')
+    parser.add_argument('--crf', type=int, default=config.DEFAULT_CRF,
+                        help=f'Output video CRF quality (default: {config.DEFAULT_CRF})')
     parser.add_argument('--duration', type=float, help='Only process first N seconds (for testing)')
     args = parser.parse_args()
 
@@ -70,7 +74,7 @@ def main():
 
     if not ncnn_binary.exists():
         print(f"Error: ncnn binary not found: {ncnn_binary}")
-        print("Please download realesrgan-ncnn-vulkan from GitHub releases")
+        print("Run: bash setup_models.sh")
         sys.exit(1)
 
     # Get video info
@@ -87,13 +91,9 @@ def main():
     print(f"Model: {args.model}")
 
     # Create temp directories
-    temp_dir = script_dir / 'temp_frames'
+    temp_dir = Path(tempfile.mkdtemp(prefix='upscale_ncnn_'))
     input_frames_dir = temp_dir / 'input'
     output_frames_dir = temp_dir / 'output'
-
-    # Clean up any existing temp dirs
-    if temp_dir.exists():
-        shutil.rmtree(temp_dir)
 
     input_frames_dir.mkdir(parents=True)
     output_frames_dir.mkdir(parents=True)
@@ -114,11 +114,6 @@ def main():
         frame_files = sorted(input_frames_dir.glob('*.png'))
         frame_count = len(frame_files)
         print(f"    Extracted {frame_count} frames")
-
-        # Estimate time
-        est_seconds = frame_count * 37  # ~37 seconds per frame on M1 Max
-        est_hours = est_seconds / 3600
-        print(f"    Estimated time: ~{est_hours:.1f} hours ({est_seconds/60:.0f} minutes)")
 
         # Step 2: Upscale frames with Real-ESRGAN ncnn-vulkan
         print(f"\n>>> Upscaling frames with Real-ESRGAN ncnn-vulkan ({args.model})...")
@@ -142,10 +137,10 @@ def main():
             'ffmpeg', '-y',
             '-framerate', str(output_fps),
             '-i', str(output_frames_dir / 'frame_%08d.png'),
-            '-c:v', 'libx264',
+            '-c:v', config.VIDEO_CODEC,
             '-crf', str(args.crf),
-            '-preset', 'slow',
-            '-pix_fmt', 'yuv420p',
+            '-preset', config.VIDEO_PRESET,
+            '-pix_fmt', config.PIX_FMT,
             '-movflags', '+faststart',
             str(output_path)
         ], "Reassembling video...")
@@ -165,7 +160,7 @@ def main():
                 '-i', str(temp_output),
                 '-i', str(input_path),
                 '-c:v', 'copy',
-                '-c:a', 'aac', '-b:a', '192k',
+                '-c:a', 'aac', '-b:a', config.AUDIO_BITRATE,
                 '-map', '0:v:0', '-map', '1:a:0?',
                 '-shortest',
                 str(output_path)
