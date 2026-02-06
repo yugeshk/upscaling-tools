@@ -1,0 +1,9 @@
+venv/
+weights/
+models/
+realesrgan-ncnn-vulkan
+temp_frames/
+.claude/
+__pycache__/
+*.pyc
+.DS_Store
