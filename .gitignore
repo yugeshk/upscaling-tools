@@ -7,3 +7,4 @@ temp_frames/
 __pycache__/
 *.pyc
 .DS_Store
+test_output_*

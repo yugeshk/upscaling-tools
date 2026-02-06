@@ -3,7 +3,7 @@
 # Supports both NCNN-Vulkan and PyTorch backends.
 # Usage: ./upscale.sh input output [options]
 
-set -euo pipefail
+set -eo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ── Dependency checks ───────────────────────────────────────────────
